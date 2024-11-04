@@ -1,0 +1,8 @@
+werkzeug==2.0.3
+flask==2.0.3
+flask-cors==3.0.10
+python-dotenv
+crewai
+langchain
+openai
+runwayml
