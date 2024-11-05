@@ -1,6 +1,7 @@
 # app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import requests
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew
 import os
@@ -23,7 +24,13 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources=
+     {"/api/*": {
+        "origins": ["http://localhost:3000"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+    })
 transcript_agent = TranscriptAgent(os.getenv('OPENAI_API_KEY'))
 
 pika_agent = PikaWebAgent(
@@ -35,6 +42,16 @@ runway_agent = RunwayAgent(
     openai_api_key=os.getenv('OPENAI_API_KEY'),
     runway_api_key=os.getenv('RUNWAY_API_KEY')
 )
+
+@app.before_request
+def log_request_info():
+    logger.debug('Headers: %s', request.headers)
+    logger.debug('Body: %s', request.get_data())
+
+@app.after_request
+def after_request(response):
+    logger.debug('Response: %s', response.get_data())
+    return response
 
 # Create agents
 content_writer = Agent(
@@ -246,7 +263,86 @@ def reprompt_video():
             "message": str(e),
             "details": error_details
         }), 500
+
+@app.route('/api/runway/assets/upload', methods=['POST'])
+def upload_runway_asset():
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file provided"
+            }), 400
+            
+        file = request.files['file']
+        name = request.form.get('name', file.filename)
         
+        if file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+            
+        # Check file type
+        if not file.content_type.startswith('image/'):
+            return jsonify({
+                "status": "error",
+                "message": "Only image files are allowed"
+            }), 400
+            
+        # Read file data
+        file_data = file.read()
+        
+        # Log upload attempt
+        logger.debug(f"Attempting to upload file: {name} ({file.content_type})")
+        
+        result = runway_agent.upload_asset(
+            file_data=file_data,
+            file_name=name,
+            content_type=file.content_type
+        )
+        
+        logger.debug(f"Upload result: {result}")
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error uploading asset: {error_details}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "details": error_details
+        }), 500
+
+@app.route('/api/runway/assets', methods=['GET'])
+def get_runway_assets():
+    try:
+        offset = int(request.args.get('offset', 0))
+        limit = int(request.args.get('limit', 50))
+        media_type = request.args.get('mediaType', 'image')
+        
+        logger.debug(f"Getting assets with: offset={offset}, limit={limit}, type={media_type}")
+        
+        result = runway_agent.get_assets(
+            media_type=media_type,
+            offset=offset,
+            limit=limit
+        )
+        
+        if result.get("status") == "error":
+            return jsonify(result), 500
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error getting assets: {error_details}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "details": error_details
+        }), 500
+                    
 @app.route('/api/upload-youtube', methods=['POST'])
 def upload_youtube():
     try:
@@ -270,6 +366,54 @@ def upload_youtube():
         return jsonify({
             "status": "error",
             "message": str(e)
+        }), 500
+
+@app.route('/api/runway/test', methods=['GET'])
+def test_runway():
+    try:
+        # Print the API key (first few characters)
+        api_key = os.getenv('RUNWAY_API_KEY')
+        logger.debug(f"Using API key: {api_key[:8]}...")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        url = "https://api.useapi.net/v1/runwayml/assets/"
+        params = {
+            "mediaType": "image",
+            "offset": "0",
+            "limit": "1"
+        }
+        
+        logger.debug(f"Making test request to: {url}")
+        logger.debug(f"With params: {params}")
+        
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params
+        )
+        
+        logger.debug(f"Full URL called: {response.url}")
+        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"Response headers: {dict(response.headers)}")
+        logger.debug(f"Response content: {response.text}")
+        
+        return jsonify({
+            "status": "success",
+            "request_url": response.url,
+            "response_status": response.status_code,
+            "response_headers": dict(response.headers),
+            "response_content": response.text
+        })
+        
+    except Exception as e:
+        logger.error(f"Test failed: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
         }), 500
 
 if __name__ == '__main__':

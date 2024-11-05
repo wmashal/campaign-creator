@@ -1,22 +1,137 @@
 import requests
 import json
 import logging
-import time
 from typing import Dict, Optional
-from crewai import Agent, Task, Crew
-from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
 class RunwayAgent:
     def __init__(self, openai_api_key: str, runway_api_key: str):
         self.runway_api_key = runway_api_key
-        self.base_url = "https://api.useapi.net/v1/runwayml"
+        self.base_url = "https://api.useapi.net"
         self.headers = {
             "Authorization": f"Bearer {runway_api_key}",
             "Content-Type": "application/json"
         }
+        
+    def get_assets(self, media_type: str = 'image', offset: int = 0, limit: int = 50) -> Dict:
+        """Get list of assets from Runway"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.runway_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Build URL with required parameters
+            url = f"{self.base_url}/v1/runwayml/assets/"  # Note the trailing slash
+            
+            # Include all parameters in the params dictionary
+            params = {
+                "mediaType": media_type,
+                "offset": str(offset),
+                "limit": str(limit)
+            }
 
+            logger.debug(f"Getting assets from URL: {url}")
+            logger.debug(f"Headers: {headers}")
+            logger.debug(f"Params: {params}")
+            
+            # Make the request
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params
+            )
+            
+            # Log the actual URL that was called
+            logger.debug(f"Full URL with params: {response.url}")
+            logger.debug(f"Response status code: {response.status_code}")
+            logger.debug(f"Response headers: {dict(response.headers)}")
+            
+            # Check if we got a successful response
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    logger.debug(f"Parsed response: {result}")
+                    return {
+                        "status": "success",
+                        "assets": result
+                    }
+                except json.JSONDecodeError as je:
+                    logger.error(f"Failed to parse JSON response: {response.text}")
+                    return {
+                        "status": "error",
+                        "message": f"Invalid JSON response: {str(je)}"
+                    }
+            else:
+                logger.error(f"API returned error status: {response.status_code}")
+                logger.error(f"Response content: {response.text}")
+                return {
+                    "status": "error",
+                    "message": f"API returned status code {response.status_code}"
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Request failed: {str(e)}"
+            }
+        except Exception as e:
+            logger.error(f"Error getting assets: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error getting assets: {str(e)}"
+            }
+
+    def upload_asset(self, file_data: bytes, file_name: str, content_type: str) -> Dict:
+        """Upload an image asset to Runway"""
+        try:
+            files = {
+                'file': (file_name, file_data, content_type)
+            }
+            
+            params = {
+                'name': file_name
+            }
+            
+            # Updated URL with correct endpoint
+            url = f"{self.base_url}/v1/runwayml/assets"
+            logger.debug(f"Uploading asset to URL: {url}")
+            
+            response = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {self.runway_api_key}"},
+                params=params,
+                files=files
+            )
+            
+            logger.debug(f"Upload response status: {response.status_code}")
+            logger.debug(f"Upload response: {response.text}")
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            return {
+                "status": "success",
+                "asset_id": result.get("assetId"),
+                "url": result.get("url"),
+                "details": result
+            }
+        
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error during upload: {e.response.text if e.response else str(e)}")
+            return {
+                "status": "error",
+                "message": f"Upload failed: {str(e)}"
+            }
+        except Exception as e:
+            logger.error(f"Error uploading asset: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error uploading asset: {str(e)}"
+            }
+            
     def generate_video(self, data: Dict) -> Dict:
         """Generate video using Runway API"""
         try:
@@ -29,41 +144,17 @@ class RunwayAgent:
             }
 
             # Add optional parameters only if they are present
-            optional_params = [
-                'firstImage_assetId',
-                'lastImage_assetId',
-                'seed',
-                'replyUrl',
-                'replyRef',
-                'maxJobs'
-            ]
-            
-            for param in optional_params:
-                if param in data and data[param] is not None:
+            for param in ['firstImage_assetId', 'lastImage_assetId', 'seed']:
+                if data.get(param):
                     payload[param] = data[param]
 
             # Add motion controls if present
-            motion_params = ['horizontal', 'vertical', 'roll', 'zoom', 'pan', 'tilt']
-            for param in motion_params:
-                if param in data:
-                    value = data[param]
-                    # Ensure motion values are within -10 to 10 range
-                    if value is not None:
-                        payload[param] = max(-10, min(10, value))
-
-            # Validate payload parameters
-            if 'seed' in payload and not (1 <= payload['seed'] <= 4294967294):
-                raise ValueError("Seed must be between 1 and 4294967294")
-                
-            if 'seconds' in payload and payload['seconds'] not in [5, 10]:
-                payload['seconds'] = 5  # Default to 5 if invalid
-                
-            if 'maxJobs' in payload and not (1 <= payload['maxJobs'] <= 10):
-                payload['maxJobs'] = 1  # Default to 1 if invalid
+            for param in ['horizontal', 'vertical', 'roll', 'zoom', 'pan', 'tilt']:
+                if data.get(param) is not None:
+                    payload[param] = max(-10, min(10, data[param]))
 
             logger.debug(f"Sending generation request to Runway with payload: {payload}")
             
-            # Make the API request
             response = requests.post(
                 f"{self.base_url}/gen3turbo/create",
                 headers=self.headers,
@@ -74,41 +165,17 @@ class RunwayAgent:
             result = response.json()
             logger.debug(f"Runway API Response: {result}")
             
-            # Extract required information from response
             task_id = result.get('taskId')
             if not task_id:
                 raise Exception("No taskId received from Runway API")
             
-            # Format response to match expected structure
             return {
                 "status": "pending",
-                "task_id": task_id,
-                "details": {
-                    "task_type": result.get('taskType'),
-                    "created_at": result.get('createdAt'),
-                    "updated_at": result.get('updatedAt'),
-                    "options": result.get('options', {}),
-                    "status": result.get('status'),
-                    "progress_text": result.get('progressText'),
-                    "progress_ratio": result.get('progressRatio'),
-                    "estimated_start": result.get('estimatedTimeToStartSeconds')
-                },
-                "message": "Video generation started"
+                "job_id": task_id,
+                "message": "Video generation started",
+                "progress": 0
             }
             
-        except requests.exceptions.HTTPError as e:
-            error_message = str(e.response.text if e.response else e)
-            logger.error(f"HTTP Error: {error_message}")
-            return {
-                "status": "error",
-                "message": f"Runway API HTTP Error: {error_message}"
-            }
-        except ValueError as e:
-            logger.error(f"Validation Error: {str(e)}")
-            return {
-                "status": "error",
-                "message": str(e)
-            }
         except Exception as e:
             logger.error(f"Error starting video generation: {str(e)}")
             return {
@@ -128,69 +195,56 @@ class RunwayAgent:
             result = response.json()
             logger.debug(f"Runway status check response: {result}")
             
-            # Extract essential information
-            status = result.get('status', 'PENDING')
-            
-            status_data = {
-                "status": status.lower(),
-                "task_id": task_id,
-                "created_at": result.get('createdAt'),
-                "updated_at": result.get('updatedAt'),
-                "task_type": result.get('taskType'),
-                "progress_text": result.get('progressText'),
-                "progress_ratio": result.get('progressRatio'),
-                "estimated_start": result.get('estimatedTimeToStartSeconds')
+            status_map = {
+                'PENDING': 'pending',
+                'PROCESSING': 'processing',
+                'SUCCEEDED': 'completed',
+                'FAILED': 'failed'
             }
             
-            # Calculate progress percentage
-            if result.get('progressRatio') is not None:
-                status_data["progress"] = int(float(result['progressRatio']) * 100)
+            runway_status = result.get('status', 'PENDING')
+            mapped_status = status_map.get(runway_status, runway_status.lower())
             
-            # Handle different status cases
-            if status == 'SUCCEEDED':
-                # Extract video URL from artifacts
+            progress = 0
+            if result.get('progressRatio'):
+                progress = int(float(result['progressRatio']) * 100)
+            elif mapped_status == 'completed':
+                progress = 100
+                
+            status_response = {
+                "status": mapped_status,
+                "job_id": task_id,
+                "progress": progress,
+                "message": result.get('progressText', 'Processing video')
+            }
+            
+            if mapped_status == 'completed':
                 artifacts = result.get('artifacts', [])
                 if artifacts:
-                    video_artifact = next((
-                        a for a in artifacts 
-                        if a.get('metadata', {}).get('frameRate')
-                    ), None)
-                    
+                    video_artifact = next(
+                        (a for a in artifacts if a.get('metadata', {}).get('frameRate')), 
+                        None
+                    )
                     if video_artifact:
-                        status_data.update({
-                            "status": "completed",
+                        status_response.update({
                             "video_url": video_artifact.get('url'),
                             "metadata": {
                                 "duration": video_artifact.get('metadata', {}).get('duration'),
                                 "dimensions": video_artifact.get('metadata', {}).get('dimensions'),
-                                "frame_rate": video_artifact.get('metadata', {}).get('frameRate'),
-                                "file_size": video_artifact.get('fileSize')
+                                "frame_rate": video_artifact.get('metadata', {}).get('frameRate')
                             }
                         })
-            elif status == 'FAILED':
-                status_data.update({
-                    "status": "failed",
-                    "error": result.get('error'),
+            elif mapped_status == 'failed':
+                status_response.update({
                     "message": f"Generation failed: {result.get('error', 'Unknown error')}"
                 })
             
-            # Add generation options for reference
-            status_data["options"] = result.get('options', {})
+            return status_response
             
-            return status_data
-            
-        except requests.exceptions.HTTPError as e:
-            error_message = str(e.response.text if e.response else e)
-            logger.error(f"HTTP Error checking status: {error_message}")
-            return {
-                "status": "error",
-                "task_id": task_id,
-                "message": f"Error checking status: {error_message}"
-            }
         except Exception as e:
             logger.error(f"Error checking status: {str(e)}")
             return {
                 "status": "error",
-                "task_id": task_id,
+                "job_id": task_id,
                 "message": f"Error checking status: {str(e)}"
             }
